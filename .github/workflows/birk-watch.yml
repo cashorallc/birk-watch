@@ -1,0 +1,51 @@
+name: Birk Watch
+
+# Runs in GitHub's cloud on a schedule, so your PC can be off.
+on:
+  schedule:
+    # Every 30 minutes. Times are UTC. GitHub often delays scheduled
+    # runs by 5-15+ min under load — that's normal and free.
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}   # adds a manual "Run workflow" button for testing
+
+# Lets the job save the "already-seen" list back to the repo so you don't
+# get re-alerted on the same listing every run.
+permissions:
+  contents: write
+
+# If a run is still going when the next is scheduled, don't pile up.
+concurrency:
+  group: birk-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install the headless browser
+        run: python -m playwright install --with-deps chromium
+
+      - name: Run the watcher (one check)
+        env:
+          NOTIFY: ntfy
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python birk_watch.py --once
+
+      - name: Remember what we've seen
+        run: |
+          git config user.name "birk-bot"
+          git config user.email "birk-bot@users.noreply.github.com"
+          git add birk_seen.json
+          git commit -m "update seen state" || echo "no changes to commit"
+          git push || echo "nothing to push"
