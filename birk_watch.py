@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-birk_watch.py — Birkenstock bulk-deal monitor (v2)
+birk_watch.py — Bulk-deal monitor (v3)
 
-Polls liquidation/wholesale sites for Birkenstock listings and pings your phone
+Polls liquidation/wholesale sites for branded bulk lots and pings your phone
 the moment a NEW one shows up. Remembers what it has already seen so you only
 get alerted on fresh listings, not the same ones over and over.
 
-WHAT CHANGED IN v2
-------------------
-- All sites now load through a real headless browser (gets past 403 blocks &
-  JavaScript pages). Requires Playwright (see QUICK START).
-- Listing detection is now per-site: instead of hunting for the word
-  "birkenstock" in link text (which missed real listings), it finds the actual
-  product/auction cards on each site by their link pattern, and reads the title
-  from the link text, the product image's alt text, or aria-label — whichever
-  exists. This is why v1 returned 0s and v2 should not.
+WHAT'S NEW IN v3
+----------------
+- Watches MANY brands now, not just Birkenstock (see BRANDS below — edit freely).
+- Strict NO-MIX filter (all sites): skips grab-bag lots. A listing is dropped if
+  its title contains mix words ("& more", "assorted", "mixed", etc.) OR names 2+
+  different brands (e.g. "Skechers, adidas, New Balance" = mixed pallet → skip).
+- Minimum-units filter on 888 Lots only: skips lots under MIN_UNITS_888 units.
+  (Other sites already sell true bulk, so no minimum is applied there.)
 
 QUICK START
 -----------
@@ -23,7 +22,7 @@ QUICK START
 3) Set NTFY_TOPIC below to the topic you subscribed to in the ntfy phone app.
 4) Record what's already there (no alerts):  python birk_watch.py --baseline
 5) Run forever:                              python birk_watch.py
-   (or schedule `python birk_watch.py --once` with Task Scheduler / cron)
+   (or schedule `python birk_watch.py --once` with the cloud / Task Scheduler)
 
 NOTIFICATIONS: set NOTIFY to "ntfy" (easiest), "telegram", or "email" below.
 """
@@ -45,8 +44,7 @@ from bs4 import BeautifulSoup
 
 CHECK_MINUTES = 20            # how often to poll when running in loop mode
 
-# Settings can come from environment variables (used by the cloud / GitHub
-# Actions setup) and fall back to the values written here for local use.
+MIN_UNITS_888 = 10            # 888 Lots only: ignore lots smaller than this
 
 # --- Notifier: set NOTIFY to "ntfy", "telegram", or "email" ---
 NOTIFY = os.environ.get("NOTIFY", "ntfy")
@@ -77,52 +75,73 @@ HEADERS = {
 }
 
 # ============================================================================
-# SITES
-# Each site's search URL is already filtered to Birkenstock, so EVERY product
-# card on the page is relevant. We identify product cards by a URL fragment that
-# only appears on listing/detail links ("link_contains"), and skip the search
-# page's own URL plus obvious navigation ("exclude").
-#
-#   link_contains : list of substrings that mark a real listing link
-#   exclude       : list of substrings that mark junk/nav links to ignore
-#   require_kw    : if True, the title must also contain a keyword (use only for
-#                   un-filtered pages); pre-filtered pages use False.
+# BRANDS — what to hunt for. Each brand has its search aliases (used to match a
+# listing title) and the per-site search term used in the URL. Add/remove freely.
+# The "aliases" are also how we count distinct brands in a title for the no-mix
+# filter, so keep each brand's aliases grouped under that one brand.
 # ============================================================================
 
-KEYWORDS = ["birkenstock", "birk"]
+BRANDS = {
+    "Birkenstock": ["birkenstock", "birk"],
+    "Nike":        ["nike", "jordan", "air max", "air force"],
+    "Adidas":      ["adidas", "ultraboost", "yeezy", "samba"],
+    "Hoka":        ["hoka"],
+    "On":          ["on cloud", "oncloud", "on running", "cloudmonster", "cloudnova"],
+    "New Balance": ["new balance"],
+    "UGG":         ["ugg"],
+    "Champion":    ["champion"],
+    "North Face":  ["north face", "the north face", "tnf"],
+    "Carhartt":    ["carhartt"],
+    "Michael Kors":["michael kors"],
+    "Coach":       ["coach"],
+    "Fanatics":    ["fanatics"],
+}
+
+# Mix / grab-bag indicator words. If a title contains any of these, skip it.
+MIX_WORDS = [
+    "& more", "and more", "assorted", "mixed", "variety", "unsorted",
+    "misc", "multi-brand", "multi brand", "assorted brands", "various",
+]
+
+# ============================================================================
+# SITES
+# link_contains : substrings that mark a real listing link
+# exclude       : substrings that mark junk/nav links to ignore
+# is_888        : flag so the min-units filter applies only to 888 Lots
+# ============================================================================
 
 SITES = [
     {
         "name": "eBay lots",
-        "url": "https://www.ebay.com/sch/i.html?_nkw=birkenstock+lot+wholesale&_sop=10",
+        "url": "https://www.ebay.com/sch/i.html?_nkw=shoe+lot+wholesale&_sop=10",
         "render": True,
         "link_contains": ["/itm/"],
         "exclude": [],
-        "require_kw": False,
+        "is_888": False,
     },
     {
         "name": "888 Lots",
-        "url": "https://888lots.com/items?brand=birkenstock",
+        "url": "https://888lots.com/items",
         "render": True,
         "link_contains": ["/item/", "/items/"],
         "exclude": ["?brand=", "/items?", "/category"],
-        "require_kw": False,
+        "is_888": True,
     },
     {
         "name": "Liquidation.com",
-        "url": "https://www.liquidation.com/auction/search?searchparam_words=birkenstock",
+        "url": "https://www.liquidation.com/wholesale-clothing/shoes.html",
         "render": True,
         "link_contains": ["/auction/view", "/auctiondetails", "/auction/details"],
         "exclude": ["/auction/search"],
-        "require_kw": False,
+        "is_888": False,
     },
     {
-        "name": "B-Stock HSN",
-        "url": "https://bstock.com/hsn/search/?q=birkenstock",
+        "name": "B-Stock Shoes",
+        "url": "https://bstock.com/auctions/footwear-auctions/shoes/",
         "render": True,
         "link_contains": ["/auction/", "/listing/"],
         "exclude": ["/search", "/faq", "/help"],
-        "require_kw": True,   # B-Stock search can show mixed brands
+        "is_888": False,
     },
 ]
 
@@ -131,6 +150,14 @@ JUNK_TITLES = {
     "advanced", "watch", "add to cart", "buy it now", "details", "view details",
     "see details", "bid now", "place bid", "", "more",
 }
+
+# Precompile word-boundary regexes for each alias so short aliases like "on"
+# don't match inside other words (e.g. "on running" must NOT match "cliftON RUNNING").
+ALL_ALIASES = []
+for _brand, _aliases in BRANDS.items():
+    for _alias in _aliases:
+        _pat = re.compile(r"\b" + re.escape(_alias) + r"\b", re.IGNORECASE)
+        ALL_ALIASES.append((_brand, _pat))
 
 # ============================================================================
 # Fetchers
@@ -153,10 +180,55 @@ def fetch_rendered(url):
             locale="en-US",
         )
         page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(5000)   # let listings render
+        page.wait_for_timeout(5000)
         html = page.content()
         browser.close()
     return html
+
+
+# ============================================================================
+# Title analysis — brand match, mix detection, unit count
+# ============================================================================
+
+def brands_in_title(title):
+    """Return the set of distinct brands whose aliases appear in the title,
+    matched on whole-word boundaries (so 'on' won't match inside 'clifton')."""
+    found = set()
+    for brand, pat in ALL_ALIASES:
+        if pat.search(title):
+            found.add(brand)
+    return found
+
+
+def is_mix(title, matched_brands):
+    """A listing is a 'mix' (grab-bag) if it contains a mix word OR names 2+
+    distinct brands we track."""
+    low = title.lower()
+    if any(w in low for w in MIX_WORDS):
+        return True
+    if len(matched_brands) >= 2:
+        return True
+    return False
+
+
+def unit_count(title):
+    """Best-effort pull of a unit/pair/piece count from a title.
+    Looks for patterns like '40 units', '19 pairs', '124 pcs', 'lot of 30'.
+    Returns an int, or None if no count is found."""
+    low = title.lower().replace(",", "")
+    patterns = [
+        r"(\d+)\s*(?:units?|pairs?|pcs?|pieces?|ct\b|count)",
+        r"lot of\s*(\d+)",
+        r"(\d+)\s*-?\s*pack",
+    ]
+    for pat in patterns:
+        m = re.search(pat, low)
+        if m:
+            try:
+                return int(m.group(1))
+            except ValueError:
+                continue
+    return None
 
 
 # ============================================================================
@@ -164,8 +236,6 @@ def fetch_rendered(url):
 # ============================================================================
 
 def _best_title(anchor):
-    """Most descriptive text for a listing: the anchor text, else its image's
-    alt text, else an aria-label / title attribute."""
     txt = " ".join(anchor.get_text(" ", strip=True).split())
     if txt and len(txt) >= 6:
         return txt[:200]
@@ -186,50 +256,59 @@ def extract_listings(html, site):
     base = site["url"]
     link_contains = site.get("link_contains", [])
     exclude = site.get("exclude", [])
-    require_kw = site.get("require_kw", False)
+    is_888 = site.get("is_888", False)
 
     soup = BeautifulSoup(html, "html.parser")
     found = {}
 
+    candidates = []
     for a in soup.find_all("a", href=True):
         href = a["href"]
         low_href = href.lower()
-
         if link_contains and not any(p in low_href for p in link_contains):
             continue
         if any(x in low_href for x in exclude):
             continue
-
         title = _best_title(a)
         if not title or title.lower() in JUNK_TITLES:
             continue
-        if require_kw and not any(k in title.lower() for k in KEYWORDS):
-            continue
-
         link = href
         if link.startswith("/"):
             m = re.match(r"(https?://[^/]+)", base)
             if m:
                 link = m.group(1) + link
+        candidates.append((link, title))
+
+    # Fallback if the per-site link pattern matched nothing: scan all anchors
+    # whose text mentions any tracked brand.
+    if not candidates:
+        for a in soup.find_all("a", href=True):
+            title = " ".join(a.get_text(" ", strip=True).split())
+            if len(title) < 8:
+                continue
+            if not brands_in_title(title):
+                continue
+            link = a["href"]
+            if link.startswith("/"):
+                m = re.match(r"(https?://[^/]+)", base)
+                if m:
+                    link = m.group(1) + link
+            candidates.append((link, title[:200]))
+
+    # Now apply the brand / mix / units filters.
+    for link, title in candidates:
+        matched = brands_in_title(title)
+        if not matched:
+            continue                      # no tracked brand → skip
+        if is_mix(title, matched):
+            continue                      # grab-bag / multi-brand → skip
+        if is_888:
+            n = unit_count(title)
+            if n is not None and n < MIN_UNITS_888:
+                continue                  # too small a lot on 888 Lots → skip
         found[link] = title
 
-    items = [{"title": t, "link": l} for l, t in found.items()]
-
-    # Fallback: if the per-site pattern matched nothing, try the broad
-    # keyword-in-text method so we degrade gracefully instead of returning 0.
-    if not items:
-        for a in soup.find_all("a", href=True):
-            text = " ".join(a.get_text(" ", strip=True).split())
-            if len(text) >= 8 and any(k in text.lower() for k in KEYWORDS):
-                link = a["href"]
-                if link.startswith("/"):
-                    m = re.match(r"(https?://[^/]+)", base)
-                    if m:
-                        link = m.group(1) + link
-                found[link] = text[:200]
-        items = [{"title": t, "link": l} for l, t in found.items()]
-
-    return items
+    return [{"title": t, "link": l} for l, t in found.items()]
 
 
 def listing_id(site_name, item):
@@ -333,7 +412,7 @@ def check_all(first_run_silent=False):
             continue
 
         items = extract_listings(html, site)
-        print(f"[{name}] found {len(items)} listing(s)")
+        print(f"[{name}] found {len(items)} matching listing(s)")
 
         for item in items:
             iid = listing_id(name, item)
@@ -343,9 +422,11 @@ def check_all(first_run_silent=False):
             new_count += 1
             if first_run_silent:
                 continue
-            print(f"  NEW -> {item['title']}")
+            # Tag the alert with which brand(s) matched, for a cleaner heads-up.
+            matched = ", ".join(sorted(brands_in_title(item["title"]))) or "Deal"
+            print(f"  NEW [{matched}] -> {item['title']}")
             notify(
-                title=f"New Birks on {name}",
+                title=f"{matched} bulk lot on {name}",
                 message=item["title"],
                 link=item["link"],
             )
@@ -360,7 +441,7 @@ def check_all(first_run_silent=False):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Birkenstock bulk-deal monitor")
+    ap = argparse.ArgumentParser(description="Bulk-deal monitor")
     ap.add_argument("--once", action="store_true", help="run a single check and exit")
     ap.add_argument("--baseline", action="store_true",
                     help="record current listings WITHOUT alerting (run first)")
@@ -373,7 +454,8 @@ def main():
         check_all()
         return
 
-    print(f"Watching {len(SITES)} sites every {CHECK_MINUTES} min. Ctrl-C to stop.")
+    print(f"Watching {len(SITES)} sites for {len(BRANDS)} brands every "
+          f"{CHECK_MINUTES} min. Ctrl-C to stop.")
     while True:
         try:
             check_all()
